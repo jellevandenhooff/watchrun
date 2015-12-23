@@ -9,67 +9,47 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"sync"
 	"time"
+
+	"github.com/jellevandenhooff/concurrency"
 )
 
-type signaler struct {
-	mu sync.Mutex
-	ch chan struct{}
-}
-
-func newSignaler() *signaler {
-	return &signaler{
-		ch: make(chan struct{}),
+func lookupBinary(name string) (string, time.Time, error) {
+	path, err := exec.LookPath(name)
+	if err != nil {
+		return "", time.Time{}, err
 	}
-}
-
-func (s *signaler) signal() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	close(s.ch)
-	s.ch = make(chan struct{})
-}
-
-func (s *signaler) wait() <-chan struct{} {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.ch
-}
-
-func watchFile(path string) (*signaler, error) {
-	signaler := newSignaler()
 
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, err
+		return "", time.Time{}, err
 	}
 
-	go func() {
-		modTime := info.ModTime()
+	return path, info.ModTime(), nil
+}
 
+func watchBinary(name string) *concurrency.Signaler {
+	signaler := concurrency.NewSignaler()
+
+	lastPath, lastModTime, _ := lookupBinary(name)
+
+	go func() {
 		for {
 			time.Sleep(1 * time.Second)
 
-			info, err := os.Stat(path)
+			path, modTime, err := lookupBinary(name)
 			if err != nil {
-				if os.IsNotExist(err) {
-					continue
-				}
-				panic(err)
+				continue
 			}
 
-			newModTime := info.ModTime()
-			if !modTime.Equal(newModTime) {
-				signaler.signal()
-				modTime = newModTime
+			if path != lastPath || modTime != lastModTime {
+				signaler.Signal()
+				lastPath, lastModTime = path, modTime
 			}
 		}
 	}()
 
-	return signaler, nil
+	return signaler
 }
 
 func main() {
@@ -78,26 +58,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	binary, err := exec.LookPath(os.Args[1])
-	if err != nil {
-		log.Printf("failed to find binary: %s\n", err)
-		os.Exit(1)
-	}
+	binary := os.Args[1]
 	args := os.Args[2:]
 
-	signaler, err := watchFile(binary)
-	if err != nil {
-		log.Printf("failed to watch binary: %s\n", err)
-		os.Exit(1)
-	}
+	signaler := watchBinary(binary)
 
 	for {
-		changed := signaler.wait()
+		changed := signaler.Wait()
 
 		cmd := exec.Command(binary, args...)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
+
+		log.Printf("Starting %s", binary)
+		if err := cmd.Start(); err != nil {
+			log.Printf("Failed to start binary: %s\n", err)
+
+			select {
+			case <-changed:
+				log.Printf("Binary changed; continuing")
+			}
+			continue
+		}
 
 		done := make(chan struct{}, 0)
 		go func() {
@@ -105,17 +88,11 @@ func main() {
 			case <-done:
 				break
 			case <-changed:
+				log.Printf("Binary changed; killing running process")
 				cmd.Process.Kill()
 				break
 			}
 		}()
-
-		log.Printf("(re-)starting %s", binary)
-		if err := cmd.Start(); err != nil {
-			log.Printf("failed to start binary: %s\n", err)
-			os.Exit(1)
-		}
-
 		cmd.Wait()
 		close(done)
 	}

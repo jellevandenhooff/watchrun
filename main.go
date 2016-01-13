@@ -99,8 +99,7 @@ func main() {
 		select {
 		case <-changed:
 			backoff = 1 * time.Second
-		default:
-			time.Sleep(backoff)
+		case <-time.After(backoff):
 			backoff *= 2
 			if backoff > 10*time.Second {
 				backoff = 10 * time.Second

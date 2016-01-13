@@ -63,6 +63,8 @@ func main() {
 
 	signaler := watchBinary(binary)
 
+	backoff := 1 * time.Second
+
 	for {
 		changed := signaler.Wait()
 
@@ -94,6 +96,16 @@ func main() {
 			}
 		}()
 		cmd.Wait()
+		select {
+		case <-changed:
+			backoff = 1 * time.Second
+		default:
+			time.Sleep(backoff)
+			backoff *= 2
+			if backoff > 10*time.Second {
+				backoff = 10 * time.Second
+			}
+		}
 		close(done)
 	}
 }

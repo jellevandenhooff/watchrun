@@ -9,6 +9,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/jellevandenhooff/concurrency"
@@ -52,6 +54,14 @@ func watchBinary(name string) *concurrency.Signaler {
 	return signaler
 }
 
+func kill(cmd *exec.Cmd) {
+	pgid, err := syscall.Getpgid(cmd.Process.Pid)
+	if err != nil {
+		log.Fatal(err)
+	}
+	syscall.Kill(-pgid, 9)
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		log.Printf("usage: %s binary <args>", os.Args[1])
@@ -61,6 +71,9 @@ func main() {
 	binary := os.Args[1]
 	args := os.Args[2:]
 
+	interrupt := make(chan os.Signal, 1)
+	signal.Notify(interrupt, os.Interrupt)
+
 	signaler := watchBinary(binary)
 
 	backoff := 1 * time.Second
@@ -69,6 +82,7 @@ func main() {
 		changed := signaler.Wait()
 
 		cmd := exec.Command(binary, args...)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -88,11 +102,12 @@ func main() {
 		go func() {
 			select {
 			case <-done:
-				break
 			case <-changed:
 				log.Printf("Binary changed; killing running process")
-				cmd.Process.Kill()
-				break
+				kill(cmd)
+			case <-interrupt:
+				kill(cmd)
+				os.Exit(0)
 			}
 		}()
 		cmd.Wait()
